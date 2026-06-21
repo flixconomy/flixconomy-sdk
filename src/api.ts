@@ -1,0 +1,77 @@
+import { BASE_URL, loadConfig } from "./config.js";
+
+/**
+ * API-Client für die Flixconomy-Infrastruktur.
+ *
+ * Onboarding läuft als Device-Flow (wie OAuth Device Authorization):
+ *   1. deviceStart() -> verification_url + user_code (der Nutzer bestätigt im Browser)
+ *   2. devicePoll()  -> sobald bestätigt: Token + Endpunkt
+ *
+ * Inferenz läuft OpenAI-kompatibel über /v1.
+ */
+
+export interface DeviceStart {
+  device_code: string;
+  user_code: string;
+  verification_url: string;
+  interval: number; // Poll-Intervall in Sekunden
+  expires_in: number;
+}
+
+export interface DevicePoll {
+  status: "pending" | "ready" | "denied" | "expired";
+  token?: string;
+  endpoint?: string;
+  tier?: string;
+}
+
+async function req(path: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(`${BASE_URL}${path}`, init);
+  return res;
+}
+
+export async function deviceStart(): Promise<DeviceStart> {
+  const res = await req("/device/start", { method: "POST" });
+  if (!res.ok) throw new Error(`Onboarding-Start fehlgeschlagen (HTTP ${res.status})`);
+  return (await res.json()) as DeviceStart;
+}
+
+export async function devicePoll(deviceCode: string): Promise<DevicePoll> {
+  const res = await req("/device/poll", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ device_code: deviceCode }),
+  });
+  if (!res.ok) throw new Error(`Onboarding-Poll fehlgeschlagen (HTTP ${res.status})`);
+  return (await res.json()) as DevicePoll;
+}
+
+export async function listModels(): Promise<string[]> {
+  const { token } = loadConfig();
+  const res = await req("/v1/models", {
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new Error(`Modelle laden fehlgeschlagen (HTTP ${res.status})`);
+  const data = (await res.json()) as { data?: Array<{ id: string }> };
+  return (data.data ?? []).map((m) => m.id);
+}
+
+export interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+export async function chat(model: string, messages: ChatMessage[]): Promise<string> {
+  const { token } = loadConfig();
+  if (!token) throw new Error("Nicht verbunden. Bitte zuerst 'flixconomy_onboard' ausführen.");
+  const res = await req("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ model, messages }),
+  });
+  if (!res.ok) throw new Error(`Anfrage fehlgeschlagen (HTTP ${res.status})`);
+  const data = (await res.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  return data.choices?.[0]?.message?.content ?? "";
+}
