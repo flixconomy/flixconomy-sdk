@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { BASE_URL, loadConfig, saveConfig, configPath } from "./config.js";
-import { deviceStart, devicePoll, listModels, listPlans, chat } from "./api.js";
+import { deviceStart, devicePoll, listModels, listPlans, registerDirect, chat } from "./api.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -146,28 +146,62 @@ server.tool(
 );
 
 // ── Integration in die Nutzer-Anwendung (Betrieb) ─────────────────────
+type Lang = "python" | "node" | "beides";
+
+/** Baut die Integrationsanweisung (Key + base_url + Snippet) aus der lokalen Config. */
+function buildIntegration(language?: Lang): string | null {
+  const cfg = loadConfig();
+  if (!cfg.token) return null;
+  const apiBase = `${(cfg.endpoint ?? BASE_URL).replace(/\/$/, "")}/v1`;
+  const model = cfg.defaultModel ?? "gemma4:31b";
+  const env = `FLIXCONOMY_API_KEY=${cfg.token}\nFLIXCONOMY_BASE_URL=${apiBase}`;
+  const py = `from openai import OpenAI\nimport os\n\nclient = OpenAI(\n    base_url=os.environ["FLIXCONOMY_BASE_URL"],\n    api_key=os.environ["FLIXCONOMY_API_KEY"],\n)\nresp = client.chat.completions.create(\n    model="${model}",\n    messages=[{"role": "user", "content": "Hallo"}],\n)`;
+  const node = `import OpenAI from "openai";\n\nconst client = new OpenAI({\n  baseURL: process.env.FLIXCONOMY_BASE_URL,\n  apiKey: process.env.FLIXCONOMY_API_KEY,\n});\nconst resp = await client.chat.completions.create({\n  model: "${model}",\n  messages: [{ role: "user", content: "Hallo" }],\n});`;
+  const snippet = language === "python" ? py : language === "node" ? node : `# Python\n${py}\n\n// Node.js\n${node}`;
+  return (
+    `Anbindung der Anwendung an Flixconomy (Tarif ${cfg.tier ?? "?"}, Modell ${model}).\n\n` +
+    `ANWEISUNG FÜR CLAUDE — bitte eigenständig ausführen:\n` +
+    `1. Schreibe diese Variablen in die .env des Projekts und stelle sicher, dass .env in .gitignore steht (der Key ist geheim, nie committen):\n\n${env}\n\n` +
+    `2. Finde im Projekt die Stelle, an der ein LLM/OpenAI-Client konfiguriert wird, und biege sie auf base_url + API-Key um (Key aus der .env lesen, NICHT hart in den Code). Falls noch keine existiert, lege sie an:\n\n${snippet}\n\n` +
+    `3. Standard-Modell: ${model} (weitere via 'flixconomy_models', sofern im Tarif enthalten).\n` +
+    `4. Teste anschließend, dass die App/der Chat/das Dashboard des Nutzers über diesen Client läuft.\n\n` +
+    `Danach läuft die Anwendung über die Flixconomy-Infrastruktur im deutschen Rechtsraum.`
+  );
+}
+
+// Free direkt einrichten, OHNE Browser — der autonome "Magic"-Flow.
+server.tool(
+  "flixconomy_quickstart",
+  "Richtet kostenlos (Free-Tarif) und ohne Browser einen Flixconomy-Zugang ein UND liefert sofort die Integrationsanweisung. Bevorzugter Weg, wenn der Nutzer seine App schnell an deutsche KI-GPU anbinden will. Claude sollte die E-Mail des Nutzers übergeben (z.B. aus 'git config user.email' oder einmal nachfragen).",
+  {
+    email: z.string().optional().describe("E-Mail des Nutzers für die Registrierung (empfohlen)"),
+    language: z.enum(["python", "node", "beides"]).optional().describe("Sprache für den Code-Snippet"),
+  },
+  async ({ email, language }) => {
+    const existing = loadConfig();
+    if (!existing.token) {
+      try {
+        const r = await registerDirect(email);
+        saveConfig({ token: r.token, endpoint: r.endpoint, tier: r.tier, defaultModel: r.default_model ?? "gemma4:31b" });
+      } catch (e) {
+        return fail(`Schnellstart fehlgeschlagen: ${(e as Error).message}`);
+      }
+    }
+    const integration = buildIntegration(language);
+    return text(
+      `Flixconomy-Zugang aktiv (Free). Konfiguration: ${configPath()}.\n\n${integration ?? ""}`,
+    );
+  },
+);
+
 server.tool(
   "flixconomy_integrate",
-  "Liefert den Zugangs-Key + Anleitung, um die ANWENDUNG des Nutzers an die Flixconomy-Infrastruktur anzubinden (OpenAI-kompatibel). Aufrufen, sobald der Nutzer seine App auf deutscher GPU betreiben will. Gibt Claude die Werte + Schritte; Claude schreibt .env und passt den Client-Code an.",
+  "Liefert den Zugangs-Key + Anleitung, um die ANWENDUNG des Nutzers an Flixconomy anzubinden (OpenAI-kompatibel). Aufrufen, wenn bereits verbunden (z.B. nach 'flixconomy_complete') und die App angebunden werden soll. Claude führt die Schritte eigenständig aus.",
   { language: z.enum(["python", "node", "beides"]).optional().describe("bevorzugte Sprache für den Code-Snippet") },
   async ({ language }) => {
-    const cfg = loadConfig();
-    if (!cfg.token) return fail("Nicht verbunden. Bitte zuerst 'flixconomy_onboard' + 'flixconomy_complete' ausführen.");
-    const base = (cfg.endpoint ?? BASE_URL).replace(/\/$/, "");
-    const apiBase = `${base}/v1`;
-    const model = cfg.defaultModel ?? "gemma4:31b";
-    const env = `FLIXCONOMY_API_KEY=${cfg.token}\nFLIXCONOMY_BASE_URL=${apiBase}`;
-    const py = `from openai import OpenAI\nimport os\n\nclient = OpenAI(\n    base_url=os.environ["FLIXCONOMY_BASE_URL"],\n    api_key=os.environ["FLIXCONOMY_API_KEY"],\n)\nresp = client.chat.completions.create(\n    model="${model}",\n    messages=[{"role": "user", "content": "Hallo"}],\n)`;
-    const node = `import OpenAI from "openai";\n\nconst client = new OpenAI({\n  baseURL: process.env.FLIXCONOMY_BASE_URL,\n  apiKey: process.env.FLIXCONOMY_API_KEY,\n});\nconst resp = await client.chat.completions.create({\n  model: "${model}",\n  messages: [{ role: "user", content: "Hallo" }],\n});`;
-    const snippet = language === "python" ? py : language === "node" ? node : `# Python\n${py}\n\n// Node.js\n${node}`;
-    return text(
-      `Anbindung der Anwendung an Flixconomy (Tarif ${cfg.tier ?? "?"}, Modell ${model}).\n\n` +
-        `ANWEISUNG FÜR CLAUDE — bitte ausführen:\n` +
-        `1. Schreibe diese Variablen in die .env des Projekts und stelle sicher, dass .env in .gitignore steht (der Key ist geheim, nie committen):\n\n${env}\n\n` +
-        `2. Konfiguriere den OpenAI-kompatiblen Client auf base_url + API-Key (Key aus der .env lesen, NICHT hart in den Code):\n\n${snippet}\n\n` +
-        `3. Standard-Modell: ${model} (weitere via 'flixconomy_models', sofern im Tarif enthalten).\n\n` +
-        `Danach läuft die Anwendung über die Flixconomy-Infrastruktur im deutschen Rechtsraum.`,
-    );
+    const integration = buildIntegration(language);
+    if (!integration) return fail("Nicht verbunden. Bitte zuerst 'flixconomy_quickstart' (Free) oder 'flixconomy_onboard'.");
+    return text(integration);
   },
 );
 

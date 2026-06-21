@@ -55,6 +55,25 @@ export async function devicePoll(deviceCode: string): Promise<DevicePoll> {
   return (await res.json()) as DevicePoll;
 }
 
+export interface RegisterResult {
+  token: string;
+  endpoint?: string;
+  tier?: string;
+  default_model?: string;
+}
+
+/** Direkt-Registrierung ohne Browser (Free) für den autonomen Onboarding-Flow. */
+export async function registerDirect(email?: string, model?: string): Promise<RegisterResult> {
+  const res = await req("/register", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, model }),
+  });
+  if (res.status === 429) throw new Error("Zu viele Registrierungen von dieser Adresse. Bitte später erneut.");
+  if (!res.ok) throw new Error(`Registrierung fehlgeschlagen (HTTP ${res.status})`);
+  return (await res.json()) as RegisterResult;
+}
+
 export async function listPlans(): Promise<{ plans: PlanInfo[]; default_plan: string; default_model: string }> {
   const res = await req("/plans");
   if (!res.ok) throw new Error(`Tarife laden fehlgeschlagen (HTTP ${res.status})`);
