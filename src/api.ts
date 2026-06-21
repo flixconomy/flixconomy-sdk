@@ -23,6 +23,15 @@ export interface DevicePoll {
   token?: string;
   endpoint?: string;
   tier?: string;
+  default_model?: string;
+}
+
+export interface PlanInfo {
+  plan: string;
+  requestsPerMinute: number;
+  tokensPerDay: number;
+  models: string[] | "alle";
+  default: boolean;
 }
 
 async function req(path: string, init?: RequestInit): Promise<Response> {
@@ -44,6 +53,12 @@ export async function devicePoll(deviceCode: string): Promise<DevicePoll> {
   });
   if (!res.ok) throw new Error(`Onboarding-Poll fehlgeschlagen (HTTP ${res.status})`);
   return (await res.json()) as DevicePoll;
+}
+
+export async function listPlans(): Promise<{ plans: PlanInfo[]; default_plan: string; default_model: string }> {
+  const res = await req("/plans");
+  if (!res.ok) throw new Error(`Tarife laden fehlgeschlagen (HTTP ${res.status})`);
+  return (await res.json()) as { plans: PlanInfo[]; default_plan: string; default_model: string };
 }
 
 export async function listModels(): Promise<string[]> {
