@@ -80,6 +80,22 @@ export async function listPlans(): Promise<{ plans: PlanInfo[]; default_plan: st
   return (await res.json()) as { plans: PlanInfo[]; default_plan: string; default_model: string };
 }
 
+/**
+ * Prüft den gespeicherten Token LIVE gegen das aktuelle BASE_URL.
+ * Fängt die Stale-Config-Falle: ein Token von einem anderen Backend (z.B. Lokaltest)
+ * ist hier ungültig -> false -> Aufrufer registriert neu.
+ */
+export async function validateToken(): Promise<boolean> {
+  const { token } = loadConfig();
+  if (!token) return false;
+  try {
+    const res = await req("/v1/models", { headers: { authorization: `Bearer ${token}` } });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** Aktuellen Token widerrufen (serverseitig sofort ungültig). */
 export async function revoke(): Promise<boolean> {
   const { token } = loadConfig();

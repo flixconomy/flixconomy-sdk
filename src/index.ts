@@ -2,8 +2,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { BASE_URL, loadConfig, saveConfig, configPath } from "./config.js";
-import { deviceStart, devicePoll, listModels, listPlans, registerDirect, revoke, chat } from "./api.js";
+import { BASE_URL, DEFAULT_MODEL, isLocalEndpoint, loadConfig, saveConfig, configPath } from "./config.js";
+import { deviceStart, devicePoll, listModels, listPlans, registerDirect, revoke, validateToken, chat } from "./api.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -55,10 +55,10 @@ server.tool(
       for (let i = 0; i < 30; i++) {
         const p = await devicePoll(code);
         if (p.status === "ready" && p.token) {
-          saveConfig({ token: p.token, endpoint: p.endpoint, tier: p.tier, defaultModel: p.default_model ?? "gemma4:31b" });
+          saveConfig({ token: p.token, endpoint: p.endpoint, tier: p.tier, defaultModel: p.default_model ?? DEFAULT_MODEL });
           pendingDeviceCode = null;
           return text(
-            `Verbunden! Tarif: ${p.tier ?? "?"}, Modell: ${p.default_model ?? "gemma4:31b"}. Endpunkt: ${p.endpoint ?? BASE_URL}.\n\n` +
+            `Verbunden! Tarif: ${p.tier ?? "?"}, Modell: ${p.default_model ?? DEFAULT_MODEL}. Endpunkt: ${p.endpoint ?? BASE_URL}.\n\n` +
               `Für den BETRIEB Ihrer Anwendung rufe jetzt 'flixconomy_integrate' auf — das liefert den Zugangs-Key und baut ihn in Ihren Code ein.`,
           );
         }
@@ -80,9 +80,16 @@ server.tool(
   {},
   async () => {
     const cfg = loadConfig();
-    if (!cfg.token) return text("Nicht verbunden. Mit 'flixconomy_onboard' einrichten.");
+    if (!cfg.token) return text("Nicht verbunden. Mit 'flixconomy_quickstart' (Free, ohne Browser) einrichten.");
+    const ok = await validateToken();
+    if (!ok) {
+      return text(
+        `Token vorhanden, aber am Endpunkt ${BASE_URL} NICHT gültig/erreichbar ` +
+          `(evtl. alter Lokaltest-Token). Mit 'flixconomy_quickstart' (ggf. force: true) neu einrichten.`,
+      );
+    }
     return text(
-      `Verbunden mit Flixconomy.\n  Tarif:   ${cfg.tier ?? "?"}\n  Endpunkt: ${cfg.endpoint ?? BASE_URL}\n  Modell:  ${cfg.defaultModel ?? "?"}`,
+      `Verbunden mit Flixconomy (Backend bestätigt).\n  Tarif:   ${cfg.tier ?? "?"}\n  Endpunkt: ${BASE_URL}\n  Modell:  ${cfg.defaultModel ?? DEFAULT_MODEL}`,
     );
   },
 );
@@ -114,7 +121,7 @@ server.tool(
     const cfg = loadConfig();
     if (!cfg.token) return fail("Nicht verbunden. Bitte zuerst 'flixconomy_onboard' ausführen.");
     try {
-      const answer = await chat(model ?? cfg.defaultModel ?? "gemma-3-thinking", [
+      const answer = await chat(model ?? cfg.defaultModel ?? DEFAULT_MODEL, [
         { role: "user", content: prompt },
       ]);
       return text(answer);
@@ -152,14 +159,18 @@ type Lang = "python" | "node" | "beides";
 function buildIntegration(language?: Lang): string | null {
   const cfg = loadConfig();
   if (!cfg.token) return null;
-  const apiBase = `${(cfg.endpoint ?? BASE_URL).replace(/\/$/, "")}/v1`;
-  const model = cfg.defaultModel ?? "gemma4:31b";
+  // IMMER das aktuelle BASE_URL nutzen (wohin das SDK connectet), nie den evtl. veralteten cfg.endpoint.
+  const apiBase = `${BASE_URL.replace(/\/$/, "")}/v1`;
+  const model = cfg.defaultModel ?? DEFAULT_MODEL;
+  const localWarn = isLocalEndpoint(apiBase)
+    ? "\n⚠️ ACHTUNG: Dies ist ein localhost-Endpunkt — nur für lokale Tests. NICHT in eine Produktiv-.env schreiben!\n"
+    : "";
   const env = `FLIXCONOMY_API_KEY=${cfg.token}\nFLIXCONOMY_BASE_URL=${apiBase}`;
   const py = `from openai import OpenAI\nimport os\n\nclient = OpenAI(\n    base_url=os.environ["FLIXCONOMY_BASE_URL"],\n    api_key=os.environ["FLIXCONOMY_API_KEY"],\n)\nresp = client.chat.completions.create(\n    model="${model}",\n    messages=[{"role": "user", "content": "Hallo"}],\n)`;
   const node = `import OpenAI from "openai";\n\nconst client = new OpenAI({\n  baseURL: process.env.FLIXCONOMY_BASE_URL,\n  apiKey: process.env.FLIXCONOMY_API_KEY,\n});\nconst resp = await client.chat.completions.create({\n  model: "${model}",\n  messages: [{ role: "user", content: "Hallo" }],\n});`;
   const snippet = language === "python" ? py : language === "node" ? node : `# Python\n${py}\n\n// Node.js\n${node}`;
   return (
-    `Anbindung der Anwendung an Flixconomy (Tarif ${cfg.tier ?? "?"}, Modell ${model}).\n\n` +
+    `Anbindung der Anwendung an Flixconomy (Tarif ${cfg.tier ?? "?"}, Modell ${model}).\n${localWarn}\n` +
     `ANWEISUNG FÜR CLAUDE — bitte eigenständig ausführen:\n` +
     `1. Schreibe diese Variablen in die .env des Projekts und stelle sicher, dass .env in .gitignore steht (der Key ist geheim, nie committen):\n\n${env}\n\n` +
     `2. Finde im Projekt die Stelle, an der ein LLM/OpenAI-Client konfiguriert wird, und biege sie auf base_url + API-Key um (Key aus der .env lesen, NICHT hart in den Code). Falls noch keine existiert, lege sie an:\n\n${snippet}\n\n` +
@@ -176,21 +187,27 @@ server.tool(
   {
     email: z.string().optional().describe("E-Mail des Nutzers für die Registrierung (empfohlen)"),
     language: z.enum(["python", "node", "beides"]).optional().describe("Sprache für den Code-Snippet"),
+    force: z.boolean().optional().describe("erzwingt Neu-Registrierung, auch wenn schon ein Token existiert"),
   },
-  async ({ email, language }) => {
+  async ({ email, language, force }) => {
     const existing = loadConfig();
-    if (!existing.token) {
+    // Stale-Config-Falle vermeiden: vorhandenen Token LIVE gegen das aktuelle Backend prüfen.
+    // Ein Token aus einem früheren Lokaltest ist hier ungültig -> wird neu registriert.
+    let usable = false;
+    if (existing.token && !force) {
+      usable = await validateToken();
+    }
+    if (!usable) {
       try {
         const r = await registerDirect(email);
-        saveConfig({ token: r.token, endpoint: r.endpoint, tier: r.tier, defaultModel: r.default_model ?? "gemma4:31b" });
+        saveConfig({ token: r.token, endpoint: r.endpoint, tier: r.tier, defaultModel: r.default_model ?? DEFAULT_MODEL });
       } catch (e) {
         return fail(`Schnellstart fehlgeschlagen: ${(e as Error).message}`);
       }
     }
     const integration = buildIntegration(language);
-    return text(
-      `Flixconomy-Zugang aktiv (Free). Konfiguration: ${configPath()}.\n\n${integration ?? ""}`,
-    );
+    const note = usable ? "Bestehender, geprüfter Zugang wird genutzt." : "Neuer Free-Zugang eingerichtet.";
+    return text(`Flixconomy-Zugang aktiv (Free, Endpunkt ${BASE_URL}). ${note}\nKonfiguration: ${configPath()}.\n\n${integration ?? ""}`);
   },
 );
 
