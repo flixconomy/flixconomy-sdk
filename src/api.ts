@@ -80,6 +80,16 @@ export async function listPlans(): Promise<{ plans: PlanInfo[]; default_plan: st
   return (await res.json()) as { plans: PlanInfo[]; default_plan: string; default_model: string };
 }
 
+/** Aktuellen Token widerrufen (serverseitig sofort ungültig). */
+export async function revoke(): Promise<boolean> {
+  const { token } = loadConfig();
+  if (!token) return false;
+  const res = await req("/v1/revoke", { method: "POST", headers: { authorization: `Bearer ${token}` } });
+  if (!res.ok) throw new Error(`Widerruf fehlgeschlagen (HTTP ${res.status})`);
+  const data = (await res.json()) as { revoked?: boolean };
+  return data.revoked ?? false;
+}
+
 export async function listModels(): Promise<string[]> {
   const { token } = loadConfig();
   const res = await req("/v1/models", {

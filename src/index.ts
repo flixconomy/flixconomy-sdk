@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { BASE_URL, loadConfig, saveConfig, configPath } from "./config.js";
-import { deviceStart, devicePoll, listModels, listPlans, registerDirect, chat } from "./api.js";
+import { deviceStart, devicePoll, listModels, listPlans, registerDirect, revoke, chat } from "./api.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -202,6 +202,24 @@ server.tool(
     const integration = buildIntegration(language);
     if (!integration) return fail("Nicht verbunden. Bitte zuerst 'flixconomy_quickstart' (Free) oder 'flixconomy_onboard'.");
     return text(integration);
+  },
+);
+
+// ── Token widerrufen ──────────────────────────────────────────────────
+server.tool(
+  "flixconomy_revoke",
+  "Widerruft den aktuellen Zugangs-Token (z.B. bei Verdacht auf Kompromittierung). Der Token wird serverseitig sofort ungültig und lokal entfernt. Danach ist eine neue Einrichtung nötig.",
+  {},
+  async () => {
+    const cfg = loadConfig();
+    if (!cfg.token) return text("Kein Token vorhanden — nichts zu widerrufen.");
+    try {
+      await revoke();
+    } catch (e) {
+      return fail(`Widerruf fehlgeschlagen: ${(e as Error).message}`);
+    }
+    saveConfig({}); // lokale Konfiguration leeren
+    return text("Token widerrufen und lokal entfernt. Mit 'flixconomy_quickstart' neu einrichten.");
   },
 );
 
